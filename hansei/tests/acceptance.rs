@@ -4461,3 +4461,114 @@ fn test_two_releases_acceptance() {
         assert!(both.is_match(&found), "{found}");
     });
 }
+
+/// Exercise MCP through the actual binary and a freshly captured core.
+/// The CLI and MCP must agree on task identities and source locations;
+/// invalid calls must not kill the session or silently return success.
+#[test]
+fn test_mcp_core_session() {
+    use serde_json::{Value, json};
+    let bundle = fixtures().bundle("simple-await");
+    with_core("simple-await", |core| {
+        let rows = list_tasks(&bundle, core);
+        let task = task_with_future(&rows, "async fn simple_await::work");
+        let mut requests = vec![
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-06-18", "capabilities": {},
+                "clientInfo": {"name": "acceptance", "version": "1"}
+            }}),
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+        ];
+        for (id, name, args) in [
+            (3, "hansei_summary", json!({})),
+            (
+                4,
+                "hansei_tasks",
+                json!({"contains": "simple_await::work", "limit": 1}),
+            ),
+            (5, "hansei_task", json!({"task_id": task.id})),
+            (6, "hansei_trace", json!({"task_id": task.id, "limit": 1})),
+            (7, "hansei_threads", json!({"limit": 1})),
+            (8, "hansei_graph", json!({"limit": 1})),
+            (9, "hansei_tasks", json!({"limit": 0})),
+            (10, "hansei_task", json!({"task_id": "missing"})),
+            (11, "hansei_summary", json!({})),
+            (
+                12,
+                "hansei_trace",
+                json!({"task_id": task.id, "offset": 1, "limit": 1}),
+            ),
+        ] {
+            requests.push(json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": name, "arguments": args}}));
+        }
+        let input = requests
+            .iter()
+            .map(|r| format!("{r}\n"))
+            .collect::<String>();
+        let output = hansei_with(&bundle, core, &["--mcp"], &input);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let responses: Vec<Value> = stdout
+            .lines()
+            .map(|line| {
+                serde_json::from_str(line)
+                    .unwrap_or_else(|e| panic!("non-protocol stdout: {line}: {e}"))
+            })
+            .collect();
+        assert_eq!(responses.len(), 12, "{stdout}");
+        let result = |id: u64| responses.iter().find(|r| r["id"] == id).unwrap()["result"].clone();
+        assert_eq!(result(1)["protocolVersion"], "2025-06-18");
+        assert_eq!(result(2)["tools"].as_array().unwrap().len(), 6);
+        for id in [3, 4, 5, 6, 7, 8, 11, 12] {
+            let response = result(id);
+            assert_eq!(response["isError"], false, "{response}");
+            assert_eq!(response["structuredContent"]["schema_version"], 1);
+            let text: Value =
+                serde_json::from_str(response["content"][0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(text, response["structuredContent"]);
+        }
+        assert_eq!(result(3)["structuredContent"]["data"]["task_count"], 1);
+        assert_eq!(
+            result(4)["structuredContent"]["data"]["items"][0]["id"],
+            task.id
+        );
+        assert_eq!(
+            result(5)["structuredContent"]["data"]["defined"],
+            task.defined
+        );
+        let first = &result(6)["structuredContent"]["data"];
+        assert_eq!(first["items"][0]["frame"], 0);
+        assert!(
+            first["items"][0]["type"]
+                .as_str()
+                .unwrap()
+                .contains("oneshot::Receiver")
+        );
+        assert_eq!(first["chain_end"], "Primitive");
+        assert_eq!(first["assessment"]["kind"], "verified_wait");
+        assert_eq!(first["next_offset"], 1);
+        assert_eq!(
+            result(12)["structuredContent"]["data"]["items"][0]["frame"],
+            1
+        );
+        assert_eq!(
+            result(7)["structuredContent"]["data"]["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(result(9)["isError"], true);
+        assert_eq!(result(10)["isError"], true);
+        assert_eq!(
+            result(3),
+            result(11),
+            "queries must not mutate the session's evidence"
+        );
+    });
+}

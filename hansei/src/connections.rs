@@ -1217,7 +1217,7 @@ mod tests {
         assert_eq!(select(&["task", "17"]), [0x40]);
         // The caller is exact too, and apart from the driving task.
         assert_eq!(select(&["caller", "17"]), [0x10]);
-        assert_eq!(select(&["caller", "7"]), []);
+        assert!(select(&["caller", "7"]).is_empty());
         assert_eq!(select(&["rt", "0"]), [0x10, 0x20, 0x30]);
         assert_eq!(select(&["rt", "10"]), [0x40]);
         // What a TLS connection holds unsent is compared; a row that

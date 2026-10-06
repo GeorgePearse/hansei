@@ -44,6 +44,7 @@ semver = { workspace = true }
 # The listing rows derive Serialize so the JSON printer is a printer,
 # not a second model.
 serde = { workspace = true }
+serde_json = { workspace = true }
 subprocess = { workspace = true }
 # The listings cut their name columns to the terminal's width; this
 # is what says how wide it is.
