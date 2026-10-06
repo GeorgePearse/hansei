@@ -42,6 +42,13 @@ $ ls -lh cores/nexus*
 -rw-r--r--@  1 wfc   9.3M Sep  2 22:32 nexus.tinfo
 ----
 
+== Agent access
+
+Pass `--mcp` with the usual core and type-info arguments to serve read-only
+MCP tools over stdio. The tools return structured task and thread data,
+explicit async traces, bounded graph output, and analysis diagnostics.
+See link:docs/mcp.md[the agent setup and tool reference].
+
 == Usage
 
 Build `hansei` with `cargo build --release --bin hansei`.

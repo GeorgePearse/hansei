@@ -29,6 +29,7 @@ mod dump;
 mod futures;
 mod graph;
 mod info;
+mod mcp;
 #[cfg(test)]
 mod offline;
 mod output;
@@ -97,6 +98,10 @@ struct Cli {
     /// when they are answered, or at the first one that fails.
     #[arg(long, short, value_name = "COMMANDS")]
     exec: Vec<String>,
+
+    /// Serve read-only agent tools over MCP stdio for this core.
+    #[arg(long, conflicts_with = "exec")]
+    mcp: bool,
 }
 
 /// What argv can ask for other than a session on a target.
@@ -2401,7 +2406,7 @@ fn main() {
     // and a session's own diagnostics go the same way. Without a
     // subscriber `RUST_LOG` selects nothing and they all vanish.
     tracing_subscriber::registry()
-        .with(fmt::layer())
+        .with(fmt::layer().with_writer(io::stderr))
         .with(EnvFilter::from_default_env())
         .init();
 
@@ -2418,7 +2423,7 @@ fn main() {
             // clap requires --core and --tokio-info of every invocation
             // that names no subcommand.
             let session = args.session.expect("session args without a subcommand");
-            run(&session, &args.exec)
+            run(&session, &args.exec, args.mcp)
         }
     };
     if let Err(e) = res {
@@ -2466,7 +2471,7 @@ fn exits_quietly(e: &anyhow::Error) -> bool {
 /// the context borrows both, so keeping all three in one frame is what
 /// lets a session be held across many commands without a
 /// self-referential struct.
-fn run(args: &SessionArgs, exec: &[String]) -> Result<()> {
+fn run(args: &SessionArgs, exec: &[String], mcp: bool) -> Result<()> {
     // The two files are independent and each costs real time to read
     // (the core indexes its symbol tables, the bundle decompresses and
     // decodes — or, from a debug binary, is extracted outright), so one
@@ -2490,7 +2495,7 @@ fn run(args: &SessionArgs, exec: &[String]) -> Result<()> {
                 });
                 (open_core(), bundle.join().expect("bundle loader panicked"))
             });
-            session(proc?, bundle?, false, args, exec)
+            session(proc?, bundle?, false, args, exec, mcp)
         }
         // Extraction leaves the parsed DWARF to free, which takes
         // seconds; the session runs inside its continuation so that
@@ -2503,7 +2508,7 @@ fn run(args: &SessionArgs, exec: &[String]) -> Result<()> {
                 args.allow_unsupported,
                 |bundle, binary_extracted_from| {
                     let proc = proc.join().expect("core opener panicked")?;
-                    session(proc, bundle, binary_extracted_from, args, exec)
+                    session(proc, bundle, binary_extracted_from, args, exec, mcp)
                 },
             )?
         }),
@@ -2518,6 +2523,7 @@ fn session(
     binary_extracted_from: bool,
     args: &SessionArgs,
     exec: &[String],
+    mcp: bool,
 ) -> Result<()> {
     // Read from the bundle rather than from an extraction at launch, so
     // a tokio-info file says what it was written over as often as it
@@ -2529,7 +2535,11 @@ fn session(
     check_binary(&proc, args, binary_extracted_from)?;
     let session = Session::attach(&proc, &bundle, args)?;
     warm_listings(&session, &proc, &bundle);
-    repl::run(&session, exec)
+    if mcp {
+        mcp::run(&session, args)
+    } else {
+        repl::run(&session, exec)
+    }
 }
 
 /// Build what the listings read before the first command runs, so
@@ -3115,6 +3125,21 @@ mod cli_tests {
         assert_eq!(session.tokio_info.as_deref(), Some(Path::new("app.tinfo")));
         assert_eq!(session.debug_info, None);
         assert_eq!(cli.exec, ["tasks"]);
+    }
+
+    #[test]
+    fn test_mcp_requires_a_core_and_conflicts_with_exec() {
+        let args = [
+            "hansei",
+            "--core",
+            "app.core",
+            "--tokio-info",
+            "app.tinfo",
+            "--mcp",
+        ];
+        assert!(parse(&args).mcp);
+        assert!(Cli::try_parse_from(["hansei", "--mcp"]).is_err());
+        assert!(Cli::try_parse_from(args.into_iter().chain(["--exec", "tasks"])).is_err());
     }
 
     /// `--config` takes a setting and its value, once per flag, and
